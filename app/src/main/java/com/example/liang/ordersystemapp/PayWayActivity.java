@@ -63,12 +63,19 @@ public class PayWayActivity extends Activity {
     private static String wxQueryUrl = "http://andyhacker.cn/orderm/wxpay/orderquery.php?out_trade_no=";
 
     private static String alipayUrl = "http://andyhacker.cn/orderm/alpay/alpayfromclient.php";
+//    private static String alipayUrl = "http://192.168.199.172/alpay/alpayfromclient.php";
     private static String aliQueryUrl = "http://andyhacker.cn/orderm/alpay/f2fpay/orderquery.php?out_trade_no=";
+//    private static String aliQueryUrl = "http://192.168.199.172/alpay/f2fpay/orderquery.php?out_trade_no=";
 
     //
     private String outTradeNo = null;
     private String orderLabel = null;
     private String sumPrice = null;
+
+    private boolean isAli = false;
+    private boolean isQueryStop = true;
+
+    Thread queryThread;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -92,6 +99,7 @@ public class PayWayActivity extends Activity {
         wxpayBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+//                qrCodeView.       // Todo : set image to wait
                 wxpay();
             }
         });
@@ -102,117 +110,19 @@ public class PayWayActivity extends Activity {
             public void onClick(View v) {
                 // TOdo
                 sendCommadToPLC();
-                Intent intent1 = new Intent();
-                intent1.putExtra("needClear", true);
-                setResult(889, intent1);
-                finish();
+
+//                finish();
             }
         });
         qrCodeView = (ImageView)findViewById(R.id.qr_code_image_id);
+
+        queryThread = new Thread(queryRunnable);
     }
     // 支付
-    private boolean payAndQuery(boolean isAli){
-        FormBody body = new FormBody.Builder()
-                .add("outTradeNo", outTradeNo)
-                .add("orderLabel", orderLabel)
-                .add("sumPrice", sumPrice)
-                .build();
-        final OkHttpClient client = new OkHttpClient();
-        Request request = new Request.Builder()
-                .url(isAli ? alipayUrl : wxpayUrl)
-                .post(body)
-                .build();
+    private boolean payAndQuery(boolean _isAli){
+        isAli = _isAli;
 
-        /// Pay Thread
-        new Thread() {
-            @Override
-            public void run() {
-                try{
-                    client.newCall(request).enqueue(new Callback() {
-                        @Override
-                        public void onFailure(Call call, IOException e) {
-                            Log.d("Http", "失败");
-//                            Toast.makeText(PayWayActivity.this, "连接失败", Toast.LENGTH_SHORT).show();
-                        }
-
-                        @Override
-                        public void onResponse(Call call, Response response) throws IOException {
-//                            Toast.makeText(PayWayActivity.this, "连接成功" + response.toString(), Toast.LENGTH_SHORT).show();
-                            String qrStr = response.body().string();
-                            Log.d("Http", "成功"+ qrStr);
-
-                            Bitmap bitmap = FoodManager.getHttpBitMap(qrBaseURL + qrStr);
-                            // 更新付款二维码
-                            Message msg = new Message();
-                            msg.arg1 = 1;       // 1 ： 更新二维码
-                            msg.obj = bitmap;
-                            updateHandler.sendMessage(msg); // 发送更新qrcode 消息
-                            // query Thread
-                            new Thread(){
-                                boolean isLoop = true;
-                                @Override
-                                public void run() {
-                                    while (isLoop) {
-//                                    OkHttpClient client = new OkHttpClient();
-                                        Request queryReqest = new Request.Builder()
-                                                .url(aliQueryUrl + outTradeNo)
-                                                .get()
-                                                .build();
-                                        client.newCall(queryReqest).enqueue(new Callback() {
-                                            @Override
-                                            public void onFailure(Call call, IOException e) {
-                                                Log.d("Query", "查询失败");
-                                            }
-
-                                            @Override
-                                            public void onResponse(Call call, Response response) throws IOException {
-                                                try {
-                                                    String jsonStr = response.body().string();
-                                                    JSONObject jo = new JSONObject(jsonStr);
-                                                    Message msg = new Message();
-                                                    msg.arg1 = 2;           // 付款成功，发送PLC控制命令
-                                                    msg.arg2 = 1;
-
-                                                    if (isAli){
-                                                        if(jo.getJSONObject("alipay_trade_query_response").getInt("code") == 1000){
-                                                            if(jo.getJSONObject("alipay_trade_query_response").
-                                                                    getString("trade_status") == "TRADE_SUCCESS"){
-                                                                updateHandler.sendMessage(msg);
-                                                                isLoop =false;
-                                                            }
-                                                        }
-                                                        // Todo: else
-                                                    }
-                                                    else {      // wxpay
-                                                        if (jo.getString("trade_state").equals("SUCCESS")){
-                                                            updateHandler.sendMessage(msg);
-                                                            isLoop = false;
-                                                        }
-                                                        // Todo: else
-                                                    }
-
-                                                } catch (JSONException e) {
-                                                    e.printStackTrace();
-                                                }
-                                            }
-                                        });
-                                        try {
-                                            Thread.sleep(1000);
-                                        } catch (InterruptedException e) {
-                                            e.printStackTrace();
-                                        }
-                                    }
-                                }
-                            }.start();
-                        }
-                    });
-
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            }
-        }.start();
-
+        new Thread(payThreadRunnable).start();
         return false;
     }
 
@@ -235,12 +145,128 @@ public class PayWayActivity extends Activity {
                 case 2:
                     if (msg.arg2 == 1){
                         qrCodeView.setImageBitmap(FoodManager.getPaySucceedImg());
+                        isQueryStop = true;
                         sendCommadToPLC();
                     }
                 default:
                     break;
             }
 
+        }
+    };
+
+    /// Pay Thread
+    Runnable payThreadRunnable = new Runnable() {
+        @Override
+        public void run() {
+            // 停止之前的查询循环
+            isQueryStop = true;
+            try {
+                queryThread.join();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+
+            FormBody body = new FormBody.Builder()
+                    .add("outTradeNo", outTradeNo)
+                    .add("orderLabel", orderLabel)
+                    .add("sumPrice", sumPrice)
+                    .build();
+            OkHttpClient client = new OkHttpClient();
+            Request request = new Request.Builder()
+                    .url(isAli ? alipayUrl : wxpayUrl)
+                    .post(body)
+                    .build();
+
+            try{
+                client.newCall(request).enqueue(new Callback() {
+                    @Override
+                    public void onFailure(Call call, IOException e) {
+                        Log.d("Http", "失败");
+//                            Toast.makeText(PayWayActivity.this, "连接失败", Toast.LENGTH_SHORT).show();
+                    }
+
+                    @Override
+                    public void onResponse(Call call, Response response) throws IOException {
+//                            Toast.makeText(PayWayActivity.this, "连接成功" + response.toString(), Toast.LENGTH_SHORT).show();
+                        String qrStr = response.body().string();
+                        Log.d("Http", "成功"+ qrStr);
+
+                        Bitmap bitmap = FoodManager.getHttpBitMap(qrBaseURL + qrStr);
+                        // 更新付款二维码
+                        Message msg = new Message();
+                        msg.arg1 = 1;       // 1 ： 更新二维码
+                        msg.obj = bitmap;
+                        updateHandler.sendMessage(msg); // 发送更新qrcode 消息
+                        isQueryStop = false;
+                        queryThread.start();
+                    }
+                });
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    };
+
+    // query Thread
+    Runnable queryRunnable = new Runnable(){
+        @Override
+        public void run() {
+            String queryUrl = (isAli?aliQueryUrl:wxQueryUrl) + outTradeNo;
+            OkHttpClient client = new OkHttpClient();
+            Request queryReqest = new Request.Builder()
+                    .url(queryUrl)
+                    .get()
+                    .build();
+
+            while (!isQueryStop) {
+                Log.d("Loop", queryUrl);
+                client.newCall(queryReqest).enqueue(new Callback() {
+                    @Override
+                    public void onFailure(Call call, IOException e) {
+                        Log.d("Query", "查询失败");
+                    }
+
+                    @Override
+                    public void onResponse(Call call, Response response) throws IOException {
+                        try {
+                            String jsonStr = response.body().string();
+                            Log.d("HTTP Query", jsonStr);
+                            JSONObject jo = new JSONObject(jsonStr);
+                            Message msg = new Message();
+                            msg.arg1 = 2;           // 付款成功，发送PLC控制命令
+                            msg.arg2 = 1;
+
+                            if (isAli){
+                                if(jo.getString("code").equals("10000")){
+                                    Log.d("Pay", "扫码成功");
+                                    if(jo.getString("trade_status").equals("TRADE_SUCCESS")){
+                                        updateHandler.sendMessage(msg);
+                                        isQueryStop =true;
+                                    }
+                                }
+                                // Todo: else
+                            }
+                            else {      // wxpay
+                                if (jo.getString("trade_state").equals("SUCCESS")){
+                                    updateHandler.sendMessage(msg);
+                                    isQueryStop = true;
+                                }
+                                // Todo: else
+                            }
+
+                        } catch (JSONException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                });
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
         }
     };
 
@@ -288,9 +314,19 @@ public class PayWayActivity extends Activity {
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
+
+                Intent intent1 = new Intent();
+                intent1.putExtra("needClear", true);
+                setResult(889, intent1);
                 finish();
             }
         }.start();
 
+    }
+
+    @Override
+    public void onBackPressed() {
+        isQueryStop = true;
+        super.onBackPressed();
     }
 }

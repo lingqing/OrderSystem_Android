@@ -7,7 +7,8 @@
         android:id="@+id/qr_code_image_id"
         android:layout_width="wrap_content"
         android:layout_height="0dp"
-        android:layout_weight="2"/>
+        android:layout_weight="2"
+        android:layout_gravity="center"/>
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
